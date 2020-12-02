@@ -1,29 +1,89 @@
-const express = require('express')
-const bodyParser = require('body-parser')
-const { createEventAdapter } = require('@slack/events-api')
-const { createMessageAdapter } = require('@slack/interactive-messages')
-const { WebClient } = require('@slack/web-api')
-require('dotenv').config()
-const { events, actions} = require('./slack/eventsSlack')
+const express = require("express");
+const bodyParser = require("body-parser");
+const { createEventAdapter } = require("@slack/events-api");
+const { createMessageAdapter } = require("@slack/interactive-messages");
+const { WebClient } = require("@slack/web-api");
+require("dotenv").config();
+const { events, actions } = require("./slack/eventsSlack");
+const axios = require("axios");
+const qs = require("querystring");
+const { CLIENT_REDIS } = require("./slack/redis");
 
-const app = express()
-const token = process.env.SLACK_BOT_TOKEN
-const webClient = new WebClient(token)
-const port = process.env.PORT || 3000
+let AUTH_TOKEN;
 
-const slackEvents = createEventAdapter(process.env.SLACK_SIGNING_SECRET)
-const slackInteractions = createMessageAdapter(process.env.SLACK_SIGNING_SECRET)
+const app = express();
+const token = process.env.SLACK_OAUTH_ACCESS_TOKEN;
+const webClient = new WebClient(token);
+const port = process.env.PORT || 3000;
 
+const slackEvents = createEventAdapter(process.env.SLACK_SIGNING_SECRET);
+const slackInteractions = createMessageAdapter(
+  process.env.SLACK_SIGNING_SECRET
+);
 
-app.use('/slack/events', slackEvents.expressMiddleware())
-app.use('/slack/actions', slackInteractions.expressMiddleware())
+app.use("/slack/events", slackEvents.expressMiddleware());
+app.use("/slack/actions", slackInteractions.expressMiddleware());
 
-app.use(bodyParser.urlencoded({extended: true}))
-app.use(bodyParser.json())
+// CLIENT_REDIS.lrange("tokenArray2", 0, -1, function (err, token) {
+//   console.log("token", token);
+// });
 
-events('message', webClient, slackEvents)
-actions('corrector', webClient, slackInteractions)
+app.use("/slack/auth", (req, res, next) => {
+  const config = {
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+  };
+  const requestBody = {
+    client_id: process.env.SLACK_CLIENT_ID,
+    client_secret: process.env.SLACK_CLIENT_SECRET,
+    code: req.query.code,
+  };
+  axios
+    .post(
+      `https://slack.com/api/oauth.v2.access`,
+      qs.stringify(requestBody),
+      config
+    )
+    .then((response) => {
+      const {
+        authed_user: { id, access_token },
+      } = response.data;
 
-app.listen(port, function() {
-  console.log('Bot is listening on port ' + port)
-})
+      CLIENT_REDIS.lrange("tokenArray2", 0, -1, function (err, token) {
+        const findToken = token.find((elem) => {
+          const element = JSON.parse(elem);
+          AUTH_TOKEN = element;
+          return element.id === id;
+        });
+        if (!findToken) {
+          CLIENT_REDIS.lpush(
+            "tokenArray2",
+            JSON.stringify({ id, access_token })
+          );
+        }
+      });
+      res.status(200).send("<script>window.close();</script>");
+    })
+    .catch((error) => {
+      res.status(400).send(JSON.stringify(error));
+    });
+});
+
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json());
+
+events("message", webClient, slackEvents);
+actions("corrector", webClient, slackInteractions);
+
+app.listen(port, () => {
+  console.log("Bot is listening on port " + port);
+});
+
+CLIENT_REDIS.on("connect", function () {
+  console.log("Conectado a Redis Server");
+});
+
+CLIENT_REDIS.on("error", function (err) {
+  console.log("Error " + err);
+});
